@@ -260,7 +260,6 @@ func (cp *ConnectionPool) RPC(fn func(api *gsrpc.SubstrateAPI) error) ([]string,
 	}
 
 	conn.mutex.Lock()
-	conn.activeQueries++
 	conn.totalQueries++
 	conn.mutex.Unlock()
 
