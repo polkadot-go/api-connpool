@@ -118,22 +118,8 @@ func (cp *ConnectionPool) AddRPC(uid, name, url string, maxConnections, maxThrea
 			time.Sleep(2 * time.Second) // Retry delay
 		}
 		if err != nil {
-			cp.logDebug(fmt.Sprintf("Exiting AddRPC due to failure in creating API connection after 3 attempts for %s (connection %d)", url, i+1))
+			cp.logDebug(fmt.Sprintf("Exiting AddRPC due to failure in creating API connection after 3 attempts for %s (connection %d). Error: %v", url, i+1, err))
 			return
-		}
-		if i == 0 {
-			// Check chain name
-			if !cp.checkChainName(api) {
-				newServer := &RPCServer{
-					UID:      uid,
-					Name:     name,
-					URL:      url,
-					isActive: false,
-				}
-				cp.rpcServers = append(cp.rpcServers, newServer)
-				cp.logDebug(fmt.Sprintf("Chain name mismatch. Marking server %s as inactive.", uid))
-				return
-			}
 		}
 		connections[i] = &RPCConnection{
 			api:            api,
@@ -143,6 +129,21 @@ func (cp *ConnectionPool) AddRPC(uid, name, url string, maxConnections, maxThrea
 			totalFailures:  0,
 		}
 		cp.logDebug(fmt.Sprintf("Successfully established connection %d/%d for server %s", i+1, maxConnections, uid))
+	}
+
+	// Check chain name only if more than one server is defined
+	if len(cp.rpcServers) > 1 {
+		if !cp.checkChainName(connections[0].api) {
+			newServer := &RPCServer{
+				UID:      uid,
+				Name:     name,
+				URL:      url,
+				isActive: false,
+			}
+			cp.rpcServers = append(cp.rpcServers, newServer)
+			cp.logDebug(fmt.Sprintf("Chain name mismatch. Marking server %s as inactive.", uid))
+			return
+		}
 	}
 
 	newServer := &RPCServer{
@@ -213,6 +214,7 @@ func (cp *ConnectionPool) GetConnection() (*RPCServer, *RPCConnection, error) {
 				for _, conn := range server.connections {
 					conn.mutex.Lock()
 					if conn.activeQueries < server.MaxThreads {
+						conn.activeQueries++
 						conn.mutex.Unlock()
 						cp.logDebug(fmt.Sprintf("Using RPC server: UID=%s, Name=%s", server.UID, server.Name))
 						return server, conn, nil
@@ -238,6 +240,9 @@ func (cp *ConnectionPool) GetConnection() (*RPCServer, *RPCConnection, error) {
 			}
 		}
 		if leastUsedConn != nil {
+			leastUsedConn.mutex.Lock()
+			leastUsedConn.activeQueries++
+			leastUsedConn.mutex.Unlock()
 			cp.logDebug(fmt.Sprintf("Using least used RPC server: UID=%s, Name=%s", leastUsedServer.UID, leastUsedServer.Name))
 			return leastUsedServer, leastUsedConn, nil
 		}
