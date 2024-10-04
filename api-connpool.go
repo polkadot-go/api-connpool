@@ -80,6 +80,8 @@ func (cp *ConnectionPool) checkChainName(api *gsrpc.SubstrateAPI) bool {
 		return false
 	}
 
+	cp.logDebug(fmt.Sprintf("Retrieved chain name: %s", chainName))
+
 	if cp.chainName == "" {
 		// Set the chain name for the pool if not already set
 		cp.chainName = string(chainName)
@@ -108,6 +110,7 @@ func (cp *ConnectionPool) AddRPC(uid, name, url string, maxConnections, maxThrea
 		api, err := gsrpc.NewSubstrateAPI(url)
 		if err != nil {
 			cp.logDebug(fmt.Sprintf("Failed to create API connection for %s (connection %d): %v", url, i+1, err))
+			cp.logDebug("Exiting AddRPC due to failure in creating API connection.")
 			return
 		}
 		if i == 0 {
