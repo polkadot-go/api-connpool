@@ -49,7 +49,7 @@ type ConnectionPool struct {
 
 // New initializes the ConnectionPool with general configuration and a debug flag
 func New(loadbalancing string, connectionTimeout, queryTimeout time.Duration, debug bool) *ConnectionPool {
-	return &ConnectionPool{
+	cp := &ConnectionPool{
 		loadbalancing:     loadbalancing,
 		connectionTimeout: connectionTimeout,
 		queryTimeout:      queryTimeout,
@@ -57,6 +57,9 @@ func New(loadbalancing string, connectionTimeout, queryTimeout time.Duration, de
 		roundRobinIndex:   0,
 		debug:             debug,
 	}
+	// Launch CheckInactiveServers in a separate goroutine
+	go cp.CheckInactiveServers()
+	return cp
 }
 
 // logDebug logs messages if debugging is enabled
