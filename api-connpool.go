@@ -234,6 +234,40 @@ func (cp *ConnectionPool) GetConnection() (*RPCServer, *RPCConnection, error) {
 	return nil, nil, errors.New("no valid RPC connection available in the connection pool based on load balancing strategy")
 }
 
+// RPC method allows executing a provided function using an active RPC connection
+func (cp *ConnectionPool) RPC(fn func(api *gsrpc.SubstrateAPI) error) ([]string, error) {
+	server, conn, err := cp.GetConnection()
+	if err != nil {
+		return nil, err
+	}
+
+	conn.mutex.Lock()
+	conn.activeQueries++
+	conn.totalQueries++
+	conn.mutex.Unlock()
+
+	start := time.Now()
+	err = fn(conn.api)
+	duration := time.Since(start)
+
+	conn.mutex.Lock()
+	conn.activeQueries--
+	if err != nil {
+		conn.activeFailures++
+		server.mutex.Lock()
+		server.totalFailures++
+		server.mutex.Unlock()
+	}
+	conn.mutex.Unlock()
+
+	queryDetails := []string{
+		fmt.Sprintf("Server UID: %s, Name: %s, URL: %s", server.UID, server.Name, server.URL),
+		fmt.Sprintf("Query Duration: %v", duration),
+	}
+
+	return queryDetails, err
+}
+
 // CheckInactiveServers checks inactive servers and attempts to reinstate them if they are functioning correctly
 func (cp *ConnectionPool) CheckInactiveServers() {
 	for {
