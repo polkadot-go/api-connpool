@@ -3,6 +3,7 @@ package connpool
 import (
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -43,16 +44,25 @@ type ConnectionPool struct {
 	mutex             sync.Mutex
 	roundRobinIndex   int
 	chainName         string
+	debug             bool
 }
 
-// New initializes the ConnectionPool with general configuration
-func New(loadbalancing string, connectionTimeout, queryTimeout time.Duration) *ConnectionPool {
+// New initializes the ConnectionPool with general configuration and a debug flag
+func New(loadbalancing string, connectionTimeout, queryTimeout time.Duration, debug bool) *ConnectionPool {
 	return &ConnectionPool{
 		loadbalancing:     loadbalancing,
 		connectionTimeout: connectionTimeout,
 		queryTimeout:      queryTimeout,
 		rpcServers:        make([]*RPCServer, 0),
 		roundRobinIndex:   0,
+		debug:             debug,
+	}
+}
+
+// logDebug logs messages if debugging is enabled
+func (cp *ConnectionPool) logDebug(message string) {
+	if cp.debug {
+		log.Println("[DEBUG]", message)
 	}
 }
 
@@ -63,17 +73,23 @@ func (cp *ConnectionPool) checkChainName(api *gsrpc.SubstrateAPI) bool {
 
 	chainName, err := api.RPC.System.Chain()
 	if err != nil {
+		cp.logDebug(fmt.Sprintf("Failed to get chain name: %v", err))
 		return false
 	}
 
 	if cp.chainName == "" {
 		// Set the chain name for the pool if not already set
 		cp.chainName = string(chainName)
+		cp.logDebug(fmt.Sprintf("Setting chain name to: %s", chainName))
 		return true
 	}
 
 	// Ensure chain name matches the existing pool's chain name
-	return chainName == types.Text(cp.chainName)
+	isMatch := chainName == types.Text(cp.chainName)
+	if !isMatch {
+		cp.logDebug(fmt.Sprintf("Chain name mismatch: expected %s, got %s", cp.chainName, chainName))
+	}
+	return isMatch
 }
 
 // AddRPC adds a new RPC server to the connection pool
@@ -81,10 +97,13 @@ func (cp *ConnectionPool) AddRPC(uid, name, url string, maxConnections, maxThrea
 	cp.mutex.Lock()
 	defer cp.mutex.Unlock()
 
+	cp.logDebug(fmt.Sprintf("Adding RPC server: UID=%s, Name=%s, URL=%s", uid, name, url))
+
 	connections := make([]*RPCConnection, maxConnections)
 	for i := 0; i < maxConnections; i++ {
 		api, err := gsrpc.NewSubstrateAPI(url)
 		if err != nil {
+			cp.logDebug(fmt.Sprintf("Failed to create API connection for %s: %v", url, err))
 			return
 		}
 		if i == 0 {
@@ -97,6 +116,7 @@ func (cp *ConnectionPool) AddRPC(uid, name, url string, maxConnections, maxThrea
 					isActive: false,
 				}
 				cp.rpcServers = append(cp.rpcServers, newServer)
+				cp.logDebug(fmt.Sprintf("Chain name mismatch. Marking server %s as inactive.", uid))
 				return
 			}
 		}
@@ -125,12 +145,15 @@ func (cp *ConnectionPool) AddRPC(uid, name, url string, maxConnections, maxThrea
 	}
 
 	cp.rpcServers = append(cp.rpcServers, newServer)
+	cp.logDebug(fmt.Sprintf("Successfully added RPC server: UID=%s, Name=%s", uid, name))
 }
 
 // DelRPC deletes an RPC server from the connection pool
 func (cp *ConnectionPool) DelRPC(uid string) {
 	cp.mutex.Lock()
 	defer cp.mutex.Unlock()
+
+	cp.logDebug(fmt.Sprintf("Deleting RPC server: UID=%s", uid))
 
 	for i, server := range cp.rpcServers {
 		if server.UID == uid {
@@ -146,6 +169,7 @@ func (cp *ConnectionPool) DelRPC(uid string) {
 			}
 			if canDelete {
 				cp.rpcServers = append(cp.rpcServers[:i], cp.rpcServers[i+1:]...)
+				cp.logDebug(fmt.Sprintf("Successfully deleted RPC server: UID=%s", uid))
 			}
 			server.mutex.Unlock()
 			break
@@ -159,6 +183,7 @@ func (cp *ConnectionPool) GetConnection() (*RPCServer, *RPCConnection, error) {
 	defer cp.mutex.Unlock()
 
 	if len(cp.rpcServers) == 0 {
+		cp.logDebug("No RPC servers available in the connection pool.")
 		return nil, nil, errors.New("no RPC servers available in the connection pool")
 	}
 
@@ -173,6 +198,7 @@ func (cp *ConnectionPool) GetConnection() (*RPCServer, *RPCConnection, error) {
 					conn.mutex.Lock()
 					if conn.activeQueries < server.MaxThreads {
 						conn.mutex.Unlock()
+						cp.logDebug(fmt.Sprintf("Using RPC server: UID=%s, Name=%s", server.UID, server.Name))
 						return server, conn, nil
 					}
 					conn.mutex.Unlock()
@@ -196,78 +222,13 @@ func (cp *ConnectionPool) GetConnection() (*RPCServer, *RPCConnection, error) {
 			}
 		}
 		if leastUsedConn != nil {
+			cp.logDebug(fmt.Sprintf("Using least used RPC server: UID=%s, Name=%s", leastUsedServer.UID, leastUsedServer.Name))
 			return leastUsedServer, leastUsedConn, nil
 		}
 	}
 
+	cp.logDebug("No valid RPC connection available in the connection pool based on load balancing strategy.")
 	return nil, nil, errors.New("no valid RPC connection available in the connection pool based on load balancing strategy")
-}
-
-// RPC is a wrapper to execute RPC functions from gsrpc through the connection pool
-func (cp *ConnectionPool) RPC(fn func(*gsrpc.SubstrateAPI) error) ([]string, error) {
-	server, conn, err := cp.GetConnection()
-	if err != nil {
-		return nil, err
-	}
-
-	conn.mutex.Lock()
-	conn.activeQueries++
-	conn.totalQueries++
-	conn.mutex.Unlock()
-
-	server.mutex.Lock()
-	server.totalQueries++
-	server.mutex.Unlock()
-
-	startTime := time.Now()
-
-	defer func() {
-		conn.mutex.Lock()
-		conn.activeQueries--
-		conn.mutex.Unlock()
-	}()
-
-	// Run the requested function with retry logic
-	for i := 0; i < server.NumRetries; i++ {
-		err = fn(conn.api)
-		if err == nil {
-			break
-		}
-		time.Sleep(1 * time.Second) // Delay between retries
-	}
-
-	// Track query time
-	elapsedTime := time.Since(startTime)
-
-	// Handle failure tracking
-	conn.mutex.Lock()
-	if err != nil {
-		conn.activeFailures++
-		conn.totalFailures++
-	}
-	conn.mutex.Unlock()
-
-	server.mutex.Lock()
-	totalFailures := 0
-	for _, connection := range server.connections {
-		connection.mutex.Lock()
-		totalFailures += connection.activeFailures
-		connection.mutex.Unlock()
-	}
-	if totalFailures > server.MaxFailures {
-		server.isActive = false // Mark server as offline
-	}
-	server.totalFailures = totalFailures
-	server.mutex.Unlock()
-
-	// Prepare the query details for return
-	queryDetails := []string{
-		fmt.Sprintf("Server UID: %s, Server Name: %s, URL: %s", server.UID, server.Name, server.URL),
-		fmt.Sprintf("Query Time: %v", elapsedTime),
-		fmt.Sprintf("Total Queries: %d, Total Failures: %d", server.totalQueries, server.totalFailures),
-	}
-
-	return queryDetails, err
 }
 
 // CheckInactiveServers checks inactive servers and attempts to reinstate them if they are functioning correctly
@@ -291,29 +252,11 @@ func (cp *ConnectionPool) CheckInactiveServers() {
 						server.MaxConnections = int(float64(server.MaxConnections) * 0.9)
 						server.MaxThreads = int(float64(server.MaxThreads) * 0.9)
 						server.mutex.Unlock()
+						cp.logDebug(fmt.Sprintf("Reinstated inactive server: UID=%s, Name=%s", server.UID, server.Name))
 					}
 				}
 			}
 		}
 		cp.mutex.Unlock()
 	}
-}
-
-// Example function to use the connection pool
-type Chain struct {
-	pool *ConnectionPool
-}
-
-func (c *Chain) GetHeaderLatest() (*types.Header, []string, error) {
-	var header *types.Header
-	queryDetails, err := c.pool.RPC(func(api *gsrpc.SubstrateAPI) error {
-		response, err := api.RPC.Chain.GetHeaderLatest()
-		if err != nil {
-			return err
-		}
-		header = response
-		return nil
-	})
-
-	return header, queryDetails, err
 }
