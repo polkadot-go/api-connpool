@@ -45,6 +45,7 @@ type ConnectionPool struct {
 	roundRobinIndex   int
 	chainName         string
 	debug             bool
+	bufferedQueries   chan func()
 }
 
 // New initializes the ConnectionPool with general configuration and a debug flag
@@ -56,9 +57,12 @@ func New(loadbalancing string, connectionTimeout, queryTimeout time.Duration, de
 		rpcServers:        make([]*RPCServer, 0),
 		roundRobinIndex:   0,
 		debug:             debug,
+		bufferedQueries:   make(chan func(), 1000), // Buffer size for queries
 	}
 	// Launch CheckInactiveServers in a separate goroutine
 	go cp.CheckInactiveServers()
+	// Launch worker to process buffered queries
+	go cp.processBufferedQueries()
 	return cp
 }
 
@@ -252,10 +256,21 @@ func (cp *ConnectionPool) GetConnection() (*RPCServer, *RPCConnection, error) {
 	return nil, nil, errors.New("no valid RPC connection available in the connection pool based on load balancing strategy")
 }
 
+// processBufferedQueries processes buffered queries when connections become available
+func (cp *ConnectionPool) processBufferedQueries() {
+	for query := range cp.bufferedQueries {
+		query()
+	}
+}
+
 // RPC method allows executing a provided function using an active RPC connection
 func (cp *ConnectionPool) RPC(fn func(api *gsrpc.SubstrateAPI) error) ([]string, error) {
 	server, conn, err := cp.GetConnection()
 	if err != nil {
+		// Buffer the query to be retried later
+		cp.bufferedQueries <- func() {
+			_, _ = cp.RPC(fn) // Reattempt the query
+		}
 		return nil, err
 	}
 
