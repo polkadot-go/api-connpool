@@ -106,11 +106,19 @@ func (cp *ConnectionPool) AddRPC(uid, name, url string, maxConnections, maxThrea
 
 	connections := make([]*RPCConnection, maxConnections)
 	for i := 0; i < maxConnections; i++ {
-		cp.logDebug(fmt.Sprintf("Establishing connection %d/%d for server %s", i+1, maxConnections, uid))
-		api, err := gsrpc.NewSubstrateAPI(url)
+		var api *gsrpc.SubstrateAPI
+		var err error
+		for attempt := 1; attempt <= 3; attempt++ {
+			cp.logDebug(fmt.Sprintf("Establishing connection %d/%d for server %s (attempt %d)", i+1, maxConnections, uid, attempt))
+			api, err = gsrpc.NewSubstrateAPI(url)
+			if err == nil {
+				break
+			}
+			cp.logDebug(fmt.Sprintf("Failed to create API connection for %s (connection %d, attempt %d): %v", url, i+1, attempt, err))
+			time.Sleep(2 * time.Second) // Retry delay
+		}
 		if err != nil {
-			cp.logDebug(fmt.Sprintf("Failed to create API connection for %s (connection %d): %v", url, i+1, err))
-			cp.logDebug("Exiting AddRPC due to failure in creating API connection.")
+			cp.logDebug(fmt.Sprintf("Exiting AddRPC due to failure in creating API connection after 3 attempts for %s (connection %d)", url, i+1))
 			return
 		}
 		if i == 0 {
