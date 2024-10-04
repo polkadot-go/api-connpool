@@ -100,13 +100,14 @@ func (cp *ConnectionPool) AddRPC(uid, name, url string, maxConnections, maxThrea
 	cp.mutex.Lock()
 	defer cp.mutex.Unlock()
 
-	cp.logDebug(fmt.Sprintf("Adding RPC server: UID=%s, Name=%s, URL=%s", uid, name, url))
+	cp.logDebug(fmt.Sprintf("Attempting to add RPC server: UID=%s, Name=%s, URL=%s", uid, name, url))
 
 	connections := make([]*RPCConnection, maxConnections)
 	for i := 0; i < maxConnections; i++ {
+		cp.logDebug(fmt.Sprintf("Establishing connection %d/%d for server %s", i+1, maxConnections, uid))
 		api, err := gsrpc.NewSubstrateAPI(url)
 		if err != nil {
-			cp.logDebug(fmt.Sprintf("Failed to create API connection for %s: %v", url, err))
+			cp.logDebug(fmt.Sprintf("Failed to create API connection for %s (connection %d): %v", url, i+1, err))
 			return
 		}
 		if i == 0 {
@@ -130,6 +131,7 @@ func (cp *ConnectionPool) AddRPC(uid, name, url string, maxConnections, maxThrea
 			activeFailures: 0,
 			totalFailures:  0,
 		}
+		cp.logDebug(fmt.Sprintf("Successfully established connection %d/%d for server %s", i+1, maxConnections, uid))
 	}
 
 	newServer := &RPCServer{
@@ -148,7 +150,7 @@ func (cp *ConnectionPool) AddRPC(uid, name, url string, maxConnections, maxThrea
 	}
 
 	cp.rpcServers = append(cp.rpcServers, newServer)
-	cp.logDebug(fmt.Sprintf("Successfully added RPC server: UID=%s, Name=%s", uid, name))
+	cp.logDebug(fmt.Sprintf("Successfully added RPC server: UID=%s, Name=%s, URL=%s", uid, name, url))
 }
 
 // DelRPC deletes an RPC server from the connection pool
