@@ -18,6 +18,7 @@ type RPCConnection struct {
 	activeFailures int
 	totalFailures  int
 	mutex          sync.Mutex
+	cond           *sync.Cond
 }
 
 type RPCServer struct {
@@ -45,7 +46,6 @@ type ConnectionPool struct {
 	roundRobinIndex   int
 	chainName         string
 	debug             bool
-	bufferedQueries   chan func()
 }
 
 // New initializes the ConnectionPool with general configuration and a debug flag
@@ -57,12 +57,9 @@ func New(loadbalancing string, connectionTimeout, queryTimeout time.Duration, de
 		rpcServers:        make([]*RPCServer, 0),
 		roundRobinIndex:   0,
 		debug:             debug,
-		bufferedQueries:   make(chan func(), 1000), // Buffer size for queries
 	}
 	// Launch CheckInactiveServers in a separate goroutine
 	go cp.CheckInactiveServers()
-	// Launch worker to process buffered queries
-	go cp.processBufferedQueries()
 	return cp
 }
 
@@ -132,6 +129,7 @@ func (cp *ConnectionPool) AddRPC(uid, name, url string, maxConnections, maxThrea
 			activeFailures: 0,
 			totalFailures:  0,
 		}
+		connections[i].cond = sync.NewCond(&connections[i].mutex)
 		cp.logDebug(fmt.Sprintf("Successfully established connection %d/%d for server %s", i+1, maxConnections, uid))
 	}
 
@@ -252,14 +250,25 @@ func (cp *ConnectionPool) GetConnection() (*RPCServer, *RPCConnection, error) {
 		}
 	}
 
-	cp.logDebug("No valid RPC connection available in the connection pool based on load balancing strategy.")
-	return nil, nil, errors.New("no valid RPC connection available in the connection pool based on load balancing strategy")
-}
+	cp.logDebug("No valid RPC connection available in the connection pool based on load balancing strategy. Waiting for a connection to be available.")
 
-// processBufferedQueries processes buffered queries when connections become available
-func (cp *ConnectionPool) processBufferedQueries() {
-	for query := range cp.bufferedQueries {
-		query()
+	// Wait for a connection to become available
+	for {
+		for _, server := range cp.rpcServers {
+			if server.isActive {
+				for _, conn := range server.connections {
+					conn.mutex.Lock()
+					if conn.activeQueries < server.MaxThreads {
+						conn.activeQueries++
+						conn.mutex.Unlock()
+						cp.logDebug(fmt.Sprintf("Using RPC server: UID=%s, Name=%s", server.UID, server.Name))
+						return server, conn, nil
+					}
+					conn.mutex.Unlock()
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond) // Wait before retrying to acquire a connection
 	}
 }
 
@@ -267,10 +276,6 @@ func (cp *ConnectionPool) processBufferedQueries() {
 func (cp *ConnectionPool) RPC(fn func(api *gsrpc.SubstrateAPI) error) ([]string, error) {
 	server, conn, err := cp.GetConnection()
 	if err != nil {
-		// Buffer the query to be retried later
-		cp.bufferedQueries <- func() {
-			_, _ = cp.RPC(fn) // Reattempt the query
-		}
 		return nil, err
 	}
 
